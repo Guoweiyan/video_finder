@@ -1,0 +1,197 @@
+//
+// Created by weiyanguo on 2021/12/25.
+//
+
+#ifndef VIDEO_FINDER_VIDEO_AFFAIRS_H
+#define VIDEO_FINDER_VIDEO_AFFAIRS_H
+
+
+
+
+#include "basic.h"
+
+inline int
+get_stream_fps(AVStream * stream_ptr){
+    int num = stream_ptr->r_frame_rate.num;
+    int den = stream_ptr->r_frame_rate.den;
+    int fps = num/den;
+    return fps;
+}
+
+long
+get_stream_frames_number(AVStream * stream_ptr){
+    long frames_number = stream_ptr->nb_frames;
+    if(frames_number > 0){
+        return frames_number;
+    }else{
+        frames_number = (long) av_index_search_timestamp(stream_ptr, stream_ptr->duration, AVSEEK_FLAG_ANY | AVSEEK_FLAG_BACKWARD);
+//        if(frames_number < 0) {
+//            int time_base = stream_ptr->time_base.den / stream_ptr->time_base.num;
+//            frames_number = stream_ptr->duration / time_base;
+
+//        }
+        if(frames_number < 0){
+            frames_number = 0x0fffffffffffffff;
+        }
+    }
+    return frames_number;
+}
+
+
+
+int
+close_video_file(vid_info * vi_ptr){
+    avcodec_close(vi_ptr->cdc_ctx_ptr);
+    avformat_close_input(&vi_ptr->fmt_ctx_ptr);
+    vi_ptr->fmt_ctx_ptr = nullptr;
+    vi_ptr->cdc_ctx_ptr = nullptr;
+    vi_ptr->height = -1;
+    vi_ptr->width = -1;
+    return 0;
+}
+
+
+vid_info *
+open_video_file(const filesystem::path & path){
+    auto * vi_ptr = new vid_info;
+    vi_ptr->_errno = 0;
+    AVFormatContext * fmt_ctx_ptr = nullptr;
+    vi_ptr->fmt_ctx_ptr = fmt_ctx_ptr;
+    int errcode = 0;
+    if((errcode = avformat_open_input(&fmt_ctx_ptr, path.c_str(), nullptr, nullptr)) < 0){
+        printf("Error opening video file: \n");
+        vi_ptr->_errno = -1;
+        return vi_ptr;
+    }
+    vi_ptr->fmt_ctx_ptr = fmt_ctx_ptr;
+    vi_ptr->video_stream_index = av_find_best_stream(fmt_ctx_ptr, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    vi_ptr->stream_ptr = vi_ptr->fmt_ctx_ptr->streams[vi_ptr->video_stream_index];
+    vi_ptr->fps = get_stream_fps(vi_ptr->stream_ptr);
+    vi_ptr->cdc_id = vi_ptr->stream_ptr->codecpar->codec_id;
+    vi_ptr->cdc_ptr = avcodec_find_decoder(vi_ptr->cdc_id);
+    vi_ptr->cdc_ctx_ptr = avcodec_alloc_context3(vi_ptr->cdc_ptr);
+    avcodec_parameters_to_context(vi_ptr->cdc_ctx_ptr, vi_ptr->stream_ptr->codecpar);
+    if(avcodec_open2(vi_ptr->cdc_ctx_ptr, vi_ptr->cdc_ptr, 0) < 0){
+        printf("Cannot open codec\n");
+        vi_ptr->_errno = -2;
+        close_video_file(vi_ptr);
+        return vi_ptr;
+    }
+    vi_ptr->height = vi_ptr->stream_ptr->codecpar->height;
+    vi_ptr->width = vi_ptr->stream_ptr->codecpar->width;
+    vi_ptr->pixel_format = AV_PIX_FMT_RGB24;
+//    vi_ptr->pixel_format = vi_ptr->cdc_ctx_ptr->pix_fmt;
+//    printf("The video pixel format is: %d", vi_ptr->pixel_format);
+    vi_ptr->frame_number = get_stream_frames_number(vi_ptr->stream_ptr);
+
+    return vi_ptr;
+}
+
+
+int
+get_video_frames_at_interval(vid_info * vi_ptr, vector<CImg<unsigned char>> * frame_img_list, long frame_interval){
+    int frame_size = 64;
+    AVPixelFormat frame_pixel_format = AV_PIX_FMT_RGB24;
+    printf("getting video frames\n");
+    AVFrame * frame_ptr;
+//    AVFrame * converted_frame_ptr;
+    frame_ptr = av_frame_alloc();
+    if(frame_ptr == nullptr)
+        return -1;
+//    converted_frame_ptr = av_frame_alloc();
+//    if(converted_frame_ptr == nullptr)
+//        return -1;
+
+    unsigned char *dst_data[4];
+    int dst_linesize[4];
+//    converted_frame_ptr = av_frame_alloc();
+    const int channels = 3;
+    int result = 0;
+
+    vi_ptr->current_index = 0;
+    vi_ptr->next_index = 0;
+    printf("Video frame total: %lu\n", vi_ptr->frame_number);
+    while((result >= 0) && (vi_ptr->current_index <= vi_ptr->frame_number)){
+        AVPacket * packet_ptr = av_packet_alloc();
+        if(packet_ptr == nullptr){
+            break;
+        }
+        result = av_read_frame(vi_ptr->fmt_ctx_ptr, packet_ptr);
+        if(result < 0){
+            printf("Error reading frame packet\n");
+            break;
+        }
+        // if the packet_ptr is the video packet_ptr then we decode it
+        if(packet_ptr->stream_index == vi_ptr->video_stream_index){
+//            AVPacket * avPacket_ptr = av_packet_alloc();
+//            avPacket_ptr->data = packet_ptr->data;
+//            avPacket_ptr->size = packet_ptr->size;
+//            avPacket_ptr->flags = AV_PKT_FLAG_KEY;
+//            av_image_alloc(converted_frame_ptr->data, frame_ptr->linesize,
+//                           vi_ptr->width, vi_ptr->height,
+//                           vi_ptr->pixel_format,
+//                           1);
+            av_image_alloc(dst_data, dst_linesize,
+                           frame_size, frame_size,
+                           frame_pixel_format,
+                           1);
+            avcodec_send_packet(vi_ptr->cdc_ctx_ptr, packet_ptr);
+            int ret = avcodec_receive_frame(vi_ptr->cdc_ctx_ptr, frame_ptr);
+            if(ret < 0){
+                char tmp[200];
+                av_make_error_string(tmp, 200, ret);
+                printf("Decode error code %d\n", ret);
+                printf("%s", tmp);
+                return -1 ;
+            }
+
+//            if(vi_ptr->current_index == vi_ptr->next_index){
+            if(frame_ptr->key_frame){
+                vi_ptr->next_index += frame_interval;
+                CImg<unsigned char> next_image;
+                if(vi_ptr->current_index <= 100)
+                    printf("Reading index: %d\n", int(vi_ptr->current_index));
+                vi_ptr->pixel_format = vi_ptr->cdc_ctx_ptr->pix_fmt;
+
+                SwsContext * sws_ctx_ptr = sws_getContext(vi_ptr->width,vi_ptr->height, vi_ptr->pixel_format,
+                                                          frame_size,frame_size, frame_pixel_format, SWS_BILINEAR,
+                                                          nullptr, nullptr, nullptr);
+                sws_scale(sws_ctx_ptr, frame_ptr->data, frame_ptr->linesize,
+                          0, vi_ptr->cdc_ctx_ptr->height,
+                          dst_data, dst_linesize);
+
+                next_image.assign((dst_data[0] + dst_linesize[0]), channels,
+                                  frame_size, frame_size,
+                                  1, false);
+                next_image.permute_axes("yzcx");
+//                if(vi_ptr->current_index == 900){
+//                    char name[100];
+//                    char templ[] = "test-ind-%d.jpg";
+//                    sprintf(name, templ, vi_ptr->current_index);
+//                    next_image.save(name);
+//                }
+                frame_img_list->push_back(next_image);
+                sws_freeContext(sws_ctx_ptr);
+
+            }
+            vi_ptr->current_index ++;
+//            av_freep(&(frame_ptr->data)[0]);
+            av_freep(&dst_data[0]);
+//            av_packet_free(&avPacket_ptr);
+        }
+//        av_packet_free(&packet_ptr);
+        av_packet_free(&packet_ptr);
+    }
+
+//    close_video_file(vi_ptr);
+//    av_frame_free(&converted_frame_ptr);
+    av_frame_free(&frame_ptr);
+//    av_frame_free(&frame_ptr);
+//    av_packet_free(&packet_ptr);
+    return 0;
+}
+
+
+
+
+#endif //VIDEO_FINDER_VIDEO_AFFAIRS_H

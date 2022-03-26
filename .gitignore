@@ -1,0 +1,7 @@
+/test.jpg
+/*.out
+/cmake-build-debug/
+.idea/
+.DS_Store
+
+
